@@ -43,26 +43,9 @@ func updateDeviceState(c *gin.Context) {
 		return
 	}
 
-	// Check if the device exists in the database
-	var existingDevice Device
-	if err := db.First(&existingDevice, device.DeviceID).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			// If the device does not exist, create a new record
-			if err := db.Create(&device).Error; err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-				return
-			}
-		} else {
-			// If there is another error, return it
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-	} else {
-		// If the device exists, update its state
-		if err := db.Model(&existingDevice).Update("state", device.State).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
+	if err := db.Save(&device).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
 
 	// Notify State Service

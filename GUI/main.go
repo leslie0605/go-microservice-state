@@ -1,10 +1,11 @@
 package main
 
 import (
-	"fyne.io/fyne/v2"
+	"context"
 	"log"
 	"sync"
 
+	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
@@ -16,38 +17,44 @@ var (
 	mu       sync.Mutex
 )
 
-func initKafka() sarama.Consumer {
+// ConsumerGroupHandler represents the Sarama consumer group handler for GUI
+type ConsumerGroupHandler struct {
+	messageList *widget.List
+}
+
+func (h *ConsumerGroupHandler) Setup(_ sarama.ConsumerGroupSession) error   { return nil }
+func (h *ConsumerGroupHandler) Cleanup(_ sarama.ConsumerGroupSession) error { return nil }
+func (h *ConsumerGroupHandler) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
+	for message := range claim.Messages() {
+		mu.Lock()
+		messages = append(messages, string(message.Value))
+		mu.Unlock()
+		h.messageList.Refresh()
+		session.MarkMessage(message, "")
+	}
+	return nil
+}
+
+func initKafka(consumerGroupID string, messageList *widget.List) sarama.ConsumerGroup {
 	config := sarama.NewConfig()
 	config.Consumer.Return.Errors = true
 
-	consumer, err := sarama.NewConsumer([]string{"localhost:9092"}, config)
+	consumerGroup, err := sarama.NewConsumerGroup([]string{"localhost:9092"}, consumerGroupID, config)
 	if err != nil {
-		log.Fatalf("failed to start Kafka consumer: %v", err)
+		log.Fatalf("failed to start Kafka consumer group: %v", err)
 	}
 
-	return consumer
-}
-
-func consumeMessages(consumer sarama.Consumer, messageList *widget.List) {
-	partitionConsumer, err := consumer.ConsumePartition("device_states", 0, sarama.OffsetNewest)
-	if err != nil {
-		log.Fatalf("failed to start partition consumer: %v", err)
-	}
-
+	ctx := context.Background()
+	handler := &ConsumerGroupHandler{messageList: messageList}
 	go func() {
-		for message := range partitionConsumer.Messages() {
-			mu.Lock()
-			messages = append(messages, string(message.Value))
-			mu.Unlock()
-			messageList.Refresh()
+		for {
+			if err := consumerGroup.Consume(ctx, []string{"device_states"}, handler); err != nil {
+				log.Printf("Error from consumer: %v", err)
+			}
 		}
 	}()
 
-	go func() {
-		for err := range partitionConsumer.Errors() {
-			log.Printf("error consuming messages: %v", err)
-		}
-	}()
+	return consumerGroup
 }
 
 func main() {
@@ -71,8 +78,8 @@ func main() {
 		},
 	)
 
-	consumer := initKafka()
-	consumeMessages(consumer, messageList)
+	// Initialize Kafka consumer for GUI
+	initKafka("gui-consumer-group", messageList)
 
 	scrollContainer := container.NewVScroll(messageList)
 	scrollContainer.SetMinSize(fyne.NewSize(400, 250))

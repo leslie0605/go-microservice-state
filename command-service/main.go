@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"log"
 	"net/http"
 
@@ -9,10 +11,15 @@ import (
 	"gorm.io/gorm"
 )
 
-// Device represents a device with a state.
-type Device struct {
-	DeviceID int    `gorm:"primaryKey"`
-	State    string `gorm:"type:varchar(255)"`
+// Command represents a command to change device state
+type Command struct {
+	DeviceID int `json:"DeviceID"` // Ensure the JSON tag matches the JSON field name
+	Cmd      int `json:"Cmd"`      // Ensure the JSON tag matches the JSON field name
+}
+
+type Ack struct {
+	DeviceID int    `json:"device_id"`
+	Status   string `json:"status"` // "ack" or "nak"
 }
 
 var db *gorm.DB
@@ -25,18 +32,7 @@ func initDB() {
 		log.Fatalf("failed to connect database: %v", err)
 	}
 
-	db.AutoMigrate(&Device{})
-}
-
-// Command represents a command to change device state
-type Command struct {
-	DeviceID int `json:"device_id"`
-	Cmd      int `json:"cmd"` // 0: turn off, 1: turn on
-}
-
-type Ack struct {
-	DeviceID int    `json:"device_id"`
-	Status   string `json:"status"` // "ack" or "nak"
+	db.AutoMigrate(&Command{})
 }
 
 func handleCommand(c *gin.Context) {
@@ -52,30 +48,32 @@ func handleCommand(c *gin.Context) {
 		newState = "on"
 	}
 
-	// Update the device state in the database
-	var device Device
-	if err := db.First(&device, cmd.DeviceID).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			// Create new device if not found
-			device = Device{DeviceID: cmd.DeviceID, State: newState}
-			if err := db.Create(&device).Error; err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-				return
-			}
-		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-	} else {
-		// Update the existing device state
-		if err := db.Model(&device).Update("state", newState).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
+	// Prepare the data to send to the device service
+	deviceData := map[string]interface{}{
+		"DeviceID": cmd.DeviceID,
+		"State":    newState,
+	}
+	jsonData, _ := json.Marshal(deviceData)
+
+	// Log data being sent to device service
+	log.Printf("Sending data to device service: %s", jsonData)
+
+	// Call the device service to update the state
+	deviceServiceURL := "http://localhost:8080/updateDeviceState"
+	resp, err := http.Post(deviceServiceURL, "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		log.Printf("Error calling device service: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update device state"})
+		return
 	}
 
-	// Here, we assume that the device will change state and send an ACK to /ack endpoint
-	c.JSON(http.StatusOK, gin.H{"message": "Command received, waiting for device to update"})
+	if resp.StatusCode != http.StatusOK {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update device state"})
+		return
+	}
+
+	log.Printf("Command sent to device service: DeviceID=%d, NewState=%s", cmd.DeviceID, newState)
+	c.JSON(http.StatusOK, gin.H{"message": "Command sent, waiting for device to update"})
 }
 
 // handleAck handles ACK from the device
